@@ -216,22 +216,9 @@ int main() {
 	Log::Info(L"将会把C盘部分数据移动至:[%c]盘(不会影响原有数据)", disk);
 	system("pause");
 
+	//先关闭可能干扰重定向文件夹的程序
 	CloseProcess();
-
-	//new std::thread([] {
-	//	for (;;)
-	//	{
-	//		CloseProcess();
-	//		Sleep(10);
-	//	}
-	//	});
-	//打开游戏的时候关闭gamebar的弹窗
-	closeGameBar();
-
-	//关闭系统休眠
-	system("cmd.exe /c powercfg -h off");
-
-
+	//开始重定向
 	redirect(L"C:\\Users\\{user}\\Documents", L"?:\\Users\\{user}\\Documents", disk);//文档目录
 	redirect(L"C:\\Users\\{user}\\Downloads", L"?:\\Users\\{user}\\Downloads", disk);//下载目录
 	redirect(L"C:\\Users\\{user}\\Desktop", L"?:\\Users\\{user}\\Desktop", disk);//桌面目录
@@ -240,10 +227,16 @@ int main() {
 	redirect(L"C:\\Users\\{user}\\Pictures", L"?:\\Users\\{user}\\Pictures", disk);//照片目录
 	redirect(L"C:\\Users\\{user}\\Saved Games", L"?:\\Users\\{user}\\Saved Games", disk);//游戏存档
 	redirect(L"C:\\Users\\{user}\\source", L"?:\\Users\\{user}\\source", disk);//source目录
-	//redirect(L"C:\\Users\\{user}\\AppData", L"?:\\Users\\{user}\\AppData", disk);//AppData目录
 	redirect(L"C:\\Users\\{user}\\AppData\\Local\\Temp", L"?:\\Users\\{user}\\AppData\\Local\\Temp", disk);//Temp目录
-	//system("explorer.exe");
+
+	//打开游戏的时候关闭gamebar的弹窗
+	closeGameBar();
+
+	//关闭系统休眠
+	system("cmd.exe /c powercfg -h off");
+
 	system("pause");
+
 	return 0;
 }
 
