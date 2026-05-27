@@ -82,16 +82,25 @@ namespace File {
 		return true;
 	}
 	bool Move(const Text::String& oldname, const Text::String& newname) {
-		if (!File::Delete(newname)) {//进行覆盖
+		if (File::Exists(newname) && !File::Delete(newname)) {
 			auto code = ::GetLastError();
-			wprintf(L"code %d MoveFile ERROR %s \n", code, oldname.unicode().c_str());
+			wprintf(L"code %d MoveFile Delete ERROR %s\n", code, newname.unicode().c_str());
 			return false;
 		}
-		::MoveFileExW(oldname.unicode().c_str(), newname.unicode().c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
-		if (File::Exists(oldname)) {
+
+		Text::String dir = Path::GetDirectoryName(newname);
+		if (!Directory::Exists(dir)) {
+			if (!Directory::Create(dir)) {
+				return false;
+			}
+		}
+
+		if (!::MoveFileExW(oldname.unicode().c_str(), newname.unicode().c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
 			auto code = ::GetLastError();
+			wprintf(L"code %d MoveFile ERROR %s\n", code, oldname.unicode().c_str());
 			if (code == 5 && FileSystem::__RemoveAttr_OnlyRead_System(oldname.unicode())) {
-				return Move(oldname, newname);
+				// 去除只读属性后直接再调用一次 MoveFileExW，不递归
+				return ::MoveFileExW(oldname.unicode().c_str(), newname.unicode().c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
 			}
 			return false;
 		}
@@ -115,18 +124,19 @@ namespace File {
 	}
 
 	bool WriteFile(const FileStream* fileStream, const Text::String& filename) {
-		File::Delete(filename);
-		std::ofstream ofs(filename.unicode(), std::ios::binary);
-		if (!ofs.is_open()) {
-			return false;
-		}
-		ofs.write(fileStream->c_str(), fileStream->size());
-		ofs.flush();
-		return ofs.good();
+		return WriteFile(fileStream->data(), fileStream->size(), filename);
 	}
 
 	bool WriteFile(const char* fileStream, size_t count, const Text::String& filename) {
-		File::Delete(filename);
+		if (File::Exists(filename) && !File::Delete(filename)) {
+			return false;
+		}
+		Text::String dir = Path::GetDirectoryName(filename);
+		if (!Directory::Exists(dir)) {
+			if (!Directory::Create(dir)) {
+				return false;
+			}
+		}
 		std::ofstream ofs(filename.unicode(), std::ios::binary);
 		if (!ofs.is_open()) {
 			return false;
@@ -140,6 +150,13 @@ namespace File {
 	{
 		if (overwrite) {
 			File::Delete(des_filename);
+		}
+		// 确保目标目录存在
+		Text::String dir = Path::GetDirectoryName(des_filename);
+		if (!Directory::Exists(dir)) {
+			if (!Directory::Create(dir)) {
+				return false;
+			}
 		}
 		BOOL cancel = FALSE;
 		auto ret = ::CopyFileExW(src_filename.unicode().c_str(), des_filename.unicode().c_str(), NULL, NULL, &cancel, 0);

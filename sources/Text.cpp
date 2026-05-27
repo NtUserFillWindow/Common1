@@ -7,6 +7,22 @@
 
 namespace Text {
 	//-----------------------------------------------Copy Start-----------------------------------------------
+	namespace {
+		void CheckNumberConverted(const char* first, const char* last, const char* functionName)
+		{
+			if (last == first) {
+				throw std::invalid_argument(functionName);
+			}
+		}
+
+		void CheckNumberRange(const char* functionName)
+		{
+			if (errno == ERANGE) {
+				throw std::out_of_range(functionName);
+			}
+		}
+	}
+
 	size_t String::utf8Length() const {
 		const char* p = this->c_str();
 		const char* end = p + this->size();
@@ -23,26 +39,26 @@ namespace Text {
 	}
 	String::String() {}
 	String::~String() {}
-	String::String(const String& _right)noexcept :std::string(_right) {}
-	String::String(String&& _right) noexcept :std::string(std::move(_right)) {}
-	String& String::operator=(const String& _right) noexcept
+	String::String(const String& right) :std::string(right) {}
+	String::String(String&& right) : std::string(std::move(right)) {}
+	String& String::operator=(const String& right)
 	{
-		(std::string&)*this = _right;
+		(std::string&)*this = right;
 		return *this;
 	}
-	String& String::operator=(String&& _right) noexcept
+	String& String::operator=(String&& right)
 	{
-		std::string::operator=(std::move(_right));
+		std::string::operator=(std::move(right));
 		return *this;
 	}
-	String::String(const std::string& str)noexcept :std::string(str) {}
-	String::String(const char* szbuf)noexcept :std::string(szbuf) {}
-	String::String(const char* pStr, size_t count) noexcept :std::string(pStr, count) {}
-	String::String(const wchar_t* szbuf)noexcept {
+	String::String(const std::string& str) :std::string(str) {}
+	String::String(const char* szbuf) : std::string(szbuf) {}
+	String::String(const char* pStr, size_t count) : std::string(pStr, count) {}
+	String::String(const wchar_t* szbuf) {
 		if (szbuf == NULL)return;
 		UnicodeToUTF8(szbuf, this);
 	}
-	String::String(const std::wstring& wstr)noexcept {
+	String::String(const std::wstring& wstr) {
 		UnicodeToUTF8(wstr, this);
 	}
 	void String::erase(char _ch)
@@ -79,18 +95,56 @@ namespace Text {
 	}
 
 	int String::toInt() const {
-		return std::stoi(c_str());
+		char* end = NULL;
+		errno = 0;
+		long value = std::strtol(c_str(), &end, 10);
+		CheckNumberConverted(c_str(), end, "stoi");
+		CheckNumberRange("stoi");
+		if (value < (long)(std::numeric_limits<int>::min)() || value >(long)(std::numeric_limits<int>::max)()) {
+			throw std::out_of_range("stoi");
+		}
+		return (int)value;
 	}
 	float String::toFloat()const {
-		return std::stof(c_str());
+		char* end = NULL;
+		errno = 0;
+		double value = std::strtod(c_str(), &end);
+		CheckNumberConverted(c_str(), end, "stof");
+		CheckNumberRange("stof");
+		const double infinity = (std::numeric_limits<double>::infinity)();
+		float floatValue = (float)value;
+		if (value != infinity && value != -infinity &&
+			(value > (double)(std::numeric_limits<float>::max)() ||
+				value < -(double)(std::numeric_limits<float>::max)() ||
+				(value != 0.0 && floatValue == 0.0f))) {
+			throw std::out_of_range("stof");
+		}
+		return floatValue;
 	}
 	double String::toDouble()const {
-		return std::stod(c_str());
+		char* end = NULL;
+		errno = 0;
+		double value = std::strtod(c_str(), &end);
+		CheckNumberConverted(c_str(), end, "stod");
+		CheckNumberRange("stod");
+		return value;
 	}
 	int64_t String::toInt64() const {
-		return std::stoll(c_str());
+		char* end = NULL;
+		errno = 0;
+#ifdef _MSC_VER
+		int64_t value = _strtoi64(c_str(), &end, 10);
+#else
+		int64_t value = strtoll(c_str(), &end, 10);
+#endif
+		CheckNumberConverted(c_str(), end, "stoll");
+		CheckNumberRange("stoll");
+		return value;
 	}
-
+	bool String::contains(const String& str)const
+	{
+		return this->find(str) != size_t(-1);
+	}
 	String String::trim()const {
 		const char* raw = this->c_str();
 		size_t totalLen = this->size();
@@ -169,17 +223,11 @@ namespace Text {
 		UTF8ToANSI(*this, &str);
 		return str;
 	}
-	String String::FromLocal(const std::string& localStr) {
+	String String::fromLocal(const std::string& localStr) {
 		std::string u8Str;
 		ANSIToUTF8(localStr, &u8Str);
 		return u8Str;
 	}
-	String String::ToString(double number, size_t keepBitSize) {
-		std::ostringstream oss;
-		oss << std::fixed << std::setprecision(keepBitSize) << number;
-		return oss.str();
-	}
-
 	void AnyToUnicode(const std::string& src_str, UINT codePage, std::wstring* out_wstr) {
 		if (src_str.empty()) {
 			out_wstr->clear();
@@ -327,7 +375,7 @@ namespace Text {
 	}
 
 	template<typename T>
-	void __Split(const std::string& str_in, const std::string& ch_, std::vector<T>* strs_out)
+	void Split__(const std::string& str_in, const std::string& ch_, std::vector<T>* strs_out)
 	{
 		std::vector<T>& arr = *strs_out;
 		arr.clear();
@@ -347,18 +395,18 @@ namespace Text {
 		while ((pos = str_in.find(ch_, start)) != std::string::npos)
 		{
 			if (pos > start) {
-				arr.emplace_back(str_in.substr(start, pos - start));
+				arr.push_back(str_in.substr(start, pos - start));
 			}
 			start = pos + chLen;
 		}
 		// 最后一个片段
 		if (start < str_in.size()) {
-			arr.emplace_back(str_in.substr(start));
+			arr.push_back(str_in.substr(start));
 		}
 	}
 
 	template<typename T>
-	void __Split(const std::string& str_in, char ch, std::vector<T>* strs_out)
+	void Split__(const std::string& str_in, char ch, std::vector<T>* strs_out)
 	{
 		std::vector<T>& arr = *strs_out;
 		arr.clear();
@@ -373,32 +421,48 @@ namespace Text {
 		while ((pos = str_in.find(ch, start)) != std::string::npos)
 		{
 			if (pos > start) {
-				arr.emplace_back(str_in.substr(start, pos - start));
+				arr.push_back(str_in.substr(start, pos - start));
 			}
 			start = pos + 1;
 		}
 		// 最后一个片段
 		if (start < str_in.size()) {
-			arr.emplace_back(str_in.substr(start));
+			arr.push_back(str_in.substr(start));
 		}
 	}
 
 	std::vector<String> String::split(const String& ch)const
 	{
 		std::vector<String> strs;
-		__Split<String>(*this, ch, &strs);
+		Split__<String>(*this, ch, &strs);
 		return strs;
 	}
 	std::vector<String> String::split(char ch) const
 	{
 		std::vector<String> strs;
-		__Split<String>(*this, ch, &strs);
+		Split__<String>(*this, ch, &strs);
 		return strs;
 	}
 
 	void Split(const std::string& str_in, const std::string& ch_, std::vector<std::string>* strs_out) {
 
-		__Split<std::string>(str_in, ch_, strs_out);
+		Split__<std::string>(str_in, ch_, strs_out);
+	}
+
+	String ToString(double number, int precision) {
+		std::ostringstream oss;
+		oss << std::fixed << std::setprecision(precision) << number;
+		return oss.str();
+	}
+	String ToString(void* v)
+	{
+		std::ostringstream oss;
+		oss << "0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(sizeof(void*) * 2) << (uintptr_t)v;
+		return oss.str();
+	}
+	String ToString(bool v)
+	{
+		return v ? "true" : "false";
 	}
 	//-----------------------------------------------Copy End-----------------------------------------------
 };
