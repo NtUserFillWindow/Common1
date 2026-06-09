@@ -1,12 +1,13 @@
 ﻿#pragma once
 #include <iostream>
+#include <mutex>
 #include "FileSystem.h"
 #include "DateTime.h"
 namespace Log {
 	//是否将输出写入日志文件
 	extern bool WriteFile;
 	extern void WriteLog(const Text::String& log);
-
+	extern std::mutex global_log_mutex;
 	/// <summary>
 	/// 打印utf8的字符
 	/// </summary>
@@ -15,6 +16,7 @@ namespace Log {
 	/// <param name="...args"></param>
 	template<typename ...T>
 	inline Text::String Info(const Text::String& formatStr, const T &...args) {
+		std::lock_guard<std::mutex> autoLock(global_log_mutex);
 		Text::String info;
 		size_t count = sizeof...(args);
 		if (count > 0) {
@@ -47,6 +49,7 @@ namespace Log {
 	/// <param name="...args"></param>
 	template<typename ...T>
 	inline void Debug(const Text::String& formatStr, const T &...args) {
+		std::lock_guard<std::mutex> autoLock(global_log_mutex);
 #ifdef  _DEBUG
 		Text::String info;
 		size_t count = sizeof...(args);
