@@ -30,7 +30,7 @@ namespace Log {
 			delete[] buf;
 		}
 		else {
-			info = formatStr;
+			info = formatStr + "\n";
 		}
 		info = DateTime::Now().ToString("HH:mm:ss ") + info;
 		//转为本地可识别的编码
@@ -64,7 +64,7 @@ namespace Log {
 			delete[] buf;
 		}
 		else {
-			info = formatStr;
+			info = formatStr + "\n";
 		}
 		info = DateTime::Now().ToString("HH:mm:ss ") + info;
 		//转为本地可识别的编码
