@@ -1,320 +1,302 @@
 ﻿#include "WebClient.h"
 
-#if USECURL
+#include <cctype>
 
-#ifndef CURL_STATICLIB
-#define CURL_STATICLIB
-#endif // !CURL_STATICLIB
-#include "curl/curl.h"
-#include "curl/easy.h"
-#pragma comment(lib,"Crypt32.lib")//curl需要的库
-#pragma comment(lib,"wldap32.lib")//curl需要的库
-#pragma comment(lib,"ws2_32.lib") //curl需要的库
+namespace {
 
-
-
-//curl的初始化
-bool g_curl_bInit = false;
-//std::mutex g_curl_mtx;
-
-struct StructCallback
-{
-	std::function<void(long long dltotal, long long dlnow)> progressCallback;
-	ULONGLONG lastUpdate = 0;
-};
-
-//接收响应body
-size_t g_curl_write_callback(char* contents, size_t size, size_t nmemb, void* respone);
-//接受上传或者下载进度
-int g_curl_progress_callback(void* ptr, __int64 dltotal, __int64 dlnow, __int64 ultotal, __int64 ulnow);
-
-int CurlGlobalInit() {
-	if (!g_curl_bInit) {
-		CURLcode code = curl_global_init(CURL_GLOBAL_ALL);
-		if (code == CURLE_OK) {
-			g_curl_bInit = true;
-		}
-		return code;
-	}
-	return CURLcode::CURLE_OK;
-}
-
-//定义
-WebClient::WebClient() {
+	std::string Trim(const std::string& value)
 	{
-		//g_curl_mtx.lock();
-		CurlGlobalInit();
-		//g_curl_mtx.unlock();
+		size_t begin = 0;
+		while (begin < value.size() && std::isspace((unsigned char)value[begin])) {
+			begin++;
+		}
+
+		size_t end = value.size();
+		while (end > begin && std::isspace((unsigned char)value[end - 1])) {
+			end--;
+		}
+		return value.substr(begin, end - begin);
 	}
-}
 
-void WebClient::Cancel() {
-	content.cancel = true;
-}
-
-WebClient::~WebClient() {
-}
-
-size_t g_curl_write_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
-	size_t count = size * nmemb;
-	auto* ct = (WebClient::Content*)userdata;
-	do
+	std::string ToLower(std::string value)
 	{
-		if (ct == NULL) {
-			break;
+		for (auto& ch : value) {
+			ch = (char)std::tolower((unsigned char)ch);
 		}
-		if (ct->cancel) {//已取消请求
-			return 0;
-		}
-		if (ct->type == 0) { //基本请求
-			auto* response = (std::string*)ct->tag;
-			response->append(ptr, count);
-			break;
-		}
-		if (ct->type == 1) { //文件下载
-			auto* ofs = (std::ofstream*)ct->tag;
-			ofs->write(ptr, count);
-			ofs->flush();
-			break;
-		}
-	} while (false);
-	return count;
-};
-
-int g_curl_progress_callback(void* ptr, __int64 dltotal, __int64 dlnow, __int64 ultotal, __int64 ulnow)
-{
-	if (!ptr || dltotal <= 0) return 0;
-
-	StructCallback* cb = static_cast<StructCallback*>(ptr);
-	ULONGLONG tick = ::GetTickCount64();
-	bool isComplete = (dlnow >= dltotal);
-
-	if (!isComplete && tick - cb->lastUpdate < 100) {
-		return 0; // 限制 100ms 更新一次
-	}
-	cb->lastUpdate = tick;
-
-	if (cb->progressCallback) {
-		cb->progressCallback(dltotal, dlnow);
-	}
-	return 0;
-}
-CURL* WebClient::Init(const std::string& strUrl, std::string* strResponse, int nTimeout) {
-	if (strResponse) {
-		strResponse->clear();
-	}
-	CURL* curl = curl_easy_init();
-	if (!curl) {
-		return curl;
+		return value;
 	}
 
-	this->content.type = 0;
-	this->content.cancel = false;
-	this->content.tag = strResponse;
-	if (!Proxy.empty()) {
-		curl_easy_setopt(curl, CURLOPT_PROXY, Proxy.c_str()); //代理服务器地址
-	}
-
-	//初始化cookie引擎
-	curl_easy_setopt(curl, CURLOPT_COOKIEFILE, "");    //初始化cookie引擎,才能正确接收到cookie数据.
-	std::string cookieStr;
-	for (auto& it : Cookies) {
-		if (!cookieStr.empty()) cookieStr += "; ";  // 分号+空格分隔
-		cookieStr += it.first + "=" + it.second;
-	}
-	curl_easy_setopt(curl, CURLOPT_COOKIE, cookieStr.c_str());
-
-	curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, false);	// 验证对方的SSL证书
-	curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, false);	//根据主机验证证书的名称
-	curl_easy_setopt(curl, CURLOPT_URL, strUrl.c_str());//设置url地址
-	curl_easy_setopt(curl, CURLOPT_TIMEOUT, nTimeout);//设置超时
-	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &this->content);//
-	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, g_curl_write_callback);//接受回调
-
-	for (auto& it : Header) {
-		auto hd = it.first + ":" + it.second;
-		curl_header = curl_slist_append((curl_slist*)curl_header, hd.c_str());
-	}
-	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, (curl_slist*)curl_header);
-	return curl;
-};
-long WebClient::CleanUp(void* curl, int code) {
-	long RESPONSE_CODE = (int)code;
-	//如果执行成功,
-	if (code == CURLE_OK)
+	bool StartsWith(const std::string& value, const std::string& prefix)
 	{
-		//获取响应的状态码
-		curl_easy_getinfo((CURL*)curl, CURLINFO_RESPONSE_CODE, &RESPONSE_CODE);
+		return value.size() >= prefix.size() && value.compare(0, prefix.size(), prefix) == 0;
+	}
 
-		struct curl_slist* cookies = NULL;
-		curl_easy_getinfo((CURL*)curl, CURLINFO_COOKIELIST, &cookies);       //获得cookie数据  
+	bool EndsWith(const std::string& value, const std::string& suffix)
+	{
+		return value.size() >= suffix.size() && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+	}
 
-		if (cookies) {
-			cookieStr.clear(); // 清空旧的 cookies，避免累积
-			struct curl_slist* current = cookies;
-			while (current)
-			{
-				if (!cookieStr.empty()) {
-					cookieStr.append("; "); // 添加分隔符
-				}
-				cookieStr.append(current->data);
-				current = current->next;
+	std::vector<std::string> Split(const std::string& value, char delimiter)
+	{
+		std::vector<std::string> fields;
+		size_t begin = 0;
+		while (begin <= value.size()) {
+			size_t end = value.find(delimiter, begin);
+			if (end == std::string::npos) {
+				fields.push_back(value.substr(begin));
+				break;
 			}
-			curl_slist_free_all(cookies); // 释放 cookie list 内存
+			fields.push_back(value.substr(begin, end - begin));
+			begin = end + 1;
+		}
+		return fields;
+	}
+
+	bool ParseCookiePair(const std::string& cookieStr, std::string* key, std::string* value)
+	{
+		size_t pos = cookieStr.find('=');
+		if (pos == std::string::npos) {
+			return false;
+		}
+
+		std::string cookieKey = Trim(cookieStr.substr(0, pos));
+		if (cookieKey.empty()) {
+			return false;
+		}
+
+		if (key) {
+			*key = cookieKey;
+		}
+		if (value) {
+			*value = Trim(cookieStr.substr(pos + 1));
+		}
+		return true;
+	}
+
+	std::string NormalizeCookieHost(const std::string& host)
+	{
+		std::string value = Trim(host);
+		const std::string httpOnlyPrefix = "#HttpOnly_";
+		if (StartsWith(value, httpOnlyPrefix)) {
+			value = value.substr(httpOnlyPrefix.size());
+		}
+		return ToLower(value);
+	}
+
+	bool CookieHostMatches(const std::string& requestHost, const std::string& cookieHost)
+	{
+		std::string host = ToLower(requestHost);
+		std::string storedHost = NormalizeCookieHost(cookieHost);
+		if (storedHost.empty()) {
+			return true;
+		}
+		if (host == storedHost) {
+			return true;
+		}
+		if (storedHost[0] == '.') {
+			std::string rootHost = storedHost.substr(1);
+			return host == rootHost || EndsWith(host, storedHost);
+		}
+		return false;
+	}
+
+	std::vector<std::string> SplitCookieList(const std::string& cookieText)
+	{
+		std::vector<std::string> items;
+		size_t begin = 0;
+		while (begin < cookieText.size()) {
+			size_t end = cookieText.find("; ", begin);
+			if (end == std::string::npos) {
+				items.push_back(cookieText.substr(begin));
+				break;
+			}
+			items.push_back(cookieText.substr(begin, end - begin));
+			begin = end + 2;
+		}
+		return items;
+	}
+
+	void ApplyHeaders(const HttpRequest& request, HttpTransport& http)
+	{
+		for (auto& item : request.Header) {
+			http.AddHeader(item.first, item.second);
+		}
+	}
+}
+
+WebClient::WebClient()
+{
+}
+
+WebClient::~WebClient()
+{
+}
+
+std::string WebClient::GetHost(const std::string& strUrl)const
+{
+	size_t begin = strUrl.find("://");
+	begin = begin == std::string::npos ? 0 : begin + 3;
+
+	size_t end = strUrl.find_first_of("/?#", begin);
+	std::string host = strUrl.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+
+	size_t userInfo = host.rfind('@');
+	if (userInfo != std::string::npos) {
+		host = host.substr(userInfo + 1);
+	}
+
+	if (!host.empty() && host[0] == '[') {
+		size_t ipv6End = host.find(']');
+		if (ipv6End != std::string::npos) {
+			return ToLower(host.substr(0, ipv6End + 1));
 		}
 	}
 
-	if (curl_header) {
-		curl_slist_free_all((curl_slist*)curl_header);
-		curl_header = NULL;
+	size_t port = host.find(':');
+	if (port != std::string::npos) {
+		host = host.substr(0, port);
 	}
-	curl_easy_cleanup(curl);
-	return RESPONSE_CODE;
-};
-int WebClient::HttpGet(const std::string& strUrl, std::string* strResponse, int nTimeout) {
-	CURL* curl = Init(strUrl, strResponse, nTimeout);
-	if (!curl) {
-		return CURLE_FAILED_INIT;
-	}
-	CURLcode code = curl_easy_perform(curl);
-	return CleanUp(curl, code);
-};
-int WebClient::HttpPost(const std::string& url, const std::string& data, std::string* respone, int _timeout) {
+	return ToLower(host);
+}
 
-	CURL* curl = Init(url, respone, _timeout);
-	if (!curl) {
-		return CURLE_FAILED_INIT;
-	}
-	curl_easy_setopt(curl, CURLOPT_POST, true);
-	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, data.c_str());
-	CURLcode code = curl_easy_perform(curl);
-	return CleanUp(curl, code);
-};
-int WebClient::UploadFile(const std::string& url, const std::string& filename, const std::string& field, std::string* respone, const std::function<void(long long dltotal, long long dlnow)>& progressCallback, int _timeout) {
-
-	CURL* curl = Init(url, respone, _timeout);
-	if (!curl) {
-		return CURLE_FAILED_INIT;
-	}
-	struct curl_httppost* formpost = 0;
-	struct curl_httppost* lastptr = 0;
-	curl_formadd(&formpost, &lastptr, CURLFORM_PTRNAME, field.c_str(), CURLFORM_FILE, filename.c_str(), CURLFORM_END);
-	curl_easy_setopt(curl, CURLOPT_HTTPPOST, formpost);
-
-	StructCallback struct_cb;
-	if (progressCallback) {
-		curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);//接受上传下载进度
-		//curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &progressCallback);//将函数回调函数设置传入指针
-		//curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, g_curl_progress_callback);//进度回调
-		struct_cb.progressCallback = progressCallback;
-		struct_cb.lastUpdate = ::GetTickCount64();
-		curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &struct_cb);
-		curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, g_curl_progress_callback);//进度回调
-	}
-
-	CURLcode  code = curl_easy_perform(curl);
-	if (formpost) {
-		curl_formfree(formpost);
-	}
-
-	return CleanUp(curl, code);
-};
-
-//multipart/form-data方式,适用于文件上传，数据被分为多个部分，每个部分都有自己的标头。
-int WebClient::SubmitForm(const std::string& strUrl, const std::vector<PostForm::Field>& fieldValues, std::string* respone, int nTimeout) {
-
-	AddHeader("Content-Type", "multipart/form-data");
-	CURL* curl = Init(strUrl, respone, nTimeout);
-	if (!curl) {
-		return CURLE_FAILED_INIT;
-	}
-	struct curl_httppost* formpost = NULL;
-	struct curl_httppost* lastptr = NULL;
-	// 设置表头，表头内容可能不同
-	for (auto& item : fieldValues) {
-		if (item.FieldType == PostForm::FieldType::File) {
-			curl_formadd(&formpost, &lastptr,
-				CURLFORM_COPYNAME, item.FieldName.c_str(),
-				CURLFORM_FILE, item.FileName.c_str(),//此处不安全 需要使用unicode才行
-				CURLFORM_CONTENTTYPE, "application/octet-stream",
-				CURLFORM_END);
+void WebClient::ApplyCookies(const std::string& host, HttpTransport& http)const
+{
+	std::lock_guard<std::mutex> lock(cookiesMutex);
+	for (auto& item : cookies) {
+		if (!CookieHostMatches(host, item.host)) {
+			continue;
 		}
-		if (item.FieldType == PostForm::FieldType::Text) {
-			curl_formadd(&formpost, &lastptr, CURLFORM_COPYNAME, item.FieldName.c_str(), CURLFORM_COPYCONTENTS, item.FieldValue.c_str(), CURLFORM_END);
+
+		std::string key;
+		std::string value;
+		if (ParseCookiePair(item.cookieStr, &key, &value)) {
+			http.AddCookie(key, value);
 		}
 	}
-	// 设置表单参数
-	curl_easy_setopt(curl, CURLOPT_HTTPPOST, formpost);
-	CURLcode code = curl_easy_perform(curl);
-
-	if (formpost) {
-		curl_formfree(formpost);
-	}
-	return CleanUp(curl, code);
-
-};
-int WebClient::DownloadFile(const std::string& url, const std::wstring& _filename, const std::function<void(long long dltotal, long long dlnow)>& progressCallback, int nTimeout) {
-	std::string resp;
-	CURL* curl = Init(url, &resp, nTimeout);
-	if (!curl) {
-		return CURLE_FAILED_INIT;
-	}
-	File::Delete(_filename);
-
-	std::ofstream ofs(_filename, std::ios::app | std::ios::binary);
-	this->content.tag = &ofs;
-	this->content.type = 1;
-
-	StructCallback struct_cb;
-	if (progressCallback) {
-		curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);//接受上传下载进度
-		//curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &progressCallback);//将函数回调函数设置传入指针
-		//curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, g_curl_progress_callback);//进度回调
-		struct_cb.progressCallback = progressCallback;
-		struct_cb.lastUpdate = ::GetTickCount64();
-		curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &struct_cb);
-		curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, g_curl_progress_callback);//进度回调
-	}
-
-	CURLcode  code = curl_easy_perform(curl);
-	return CleanUp(curl, code);
-};
-int WebClient::FtpDownLoad(const std::string& strUrl, const std::string& user, const std::string& pwd, const std::wstring& outFileName, int nTimeout) {
-
-	std::string resp;
-	CURL* curl = Init(strUrl, &resp, nTimeout);
-	if (!curl) {
-		return CURLE_FAILED_INIT;
-	}
-
-	std::ofstream ofs(outFileName, std::ios::app | std::ios::binary);
-	this->content.tag = &ofs;
-	this->content.type = 1;
-
-	if (!user.empty() && !pwd.empty()) {
-		curl_easy_setopt(curl, CURLOPT_USERPWD, (user + ":" + pwd).c_str());
-	}
-	else {
-		curl_easy_setopt(curl, CURLOPT_USERPWD, "");
-	}
-	CURLcode code = curl_easy_perform(curl);
-	return CleanUp(curl, code);
 }
-void WebClient::AddHeader(const std::string& key, const std::string& value)
-{
-	Header.insert(std::pair<std::string, std::string>(key, value));
-}
-void WebClient::AddCookie(const std::string& key, const std::string& value)
-{
-	Cookies[key] = value;
-}
-Text::String WebClient::GetCookie()const
-{
-	return cookieStr;
-}
-void WebClient::RemoveHeader(const std::string& key)
-{
-	Header.erase(key);
-};
 
-#endif
+void WebClient::SaveCookies(const std::string& host, const Text::String& cookieText)
+{
+	for (auto& item : SplitCookieList(cookieText)) {
+		item = Trim(item);
+		if (item.empty()) {
+			continue;
+		}
+
+		auto fields = Split(item, '\t');
+		if (fields.size() >= 7) {
+			std::string cookieHost = NormalizeCookieHost(fields[0]);
+			if (ToLower(fields[1]) == "true" && !cookieHost.empty() && cookieHost[0] != '.') {
+				cookieHost = "." + cookieHost;
+			}
+			SetCookie(cookieHost.empty() ? host : cookieHost, fields[5] + "=" + fields[6]);
+			continue;
+		}
+
+		SetCookie(host, item);
+	}
+}
+
+void WebClient::SetCookie(const std::string& host, const std::string& cookieStr)
+{
+	std::string key;
+	std::string value;
+	if (!ParseCookiePair(cookieStr, &key, &value)) {
+		return;
+	}
+
+	std::string cookieHost = host.find("://") == std::string::npos ? NormalizeCookieHost(host) : GetHost(host);
+	std::string newCookie = key + "=" + value;
+
+	std::lock_guard<std::mutex> lock(cookiesMutex);
+	for (auto& item : cookies) {
+		std::string oldKey;
+		if (NormalizeCookieHost(item.host) == cookieHost && ParseCookiePair(item.cookieStr, &oldKey, NULL) && oldKey == key) {
+			item.cookieStr = newCookie;
+			return;
+		}
+	}
+
+	cookie item;
+	item.host = cookieHost;
+	item.cookieStr = newCookie;
+	cookies.push_back(item);
+}
+
+std::string WebClient::GetCookie(const std::string& host)
+{
+	std::string cookieText;
+	std::string requestHost = host.find("://") == std::string::npos ? ToLower(host) : GetHost(host);
+
+	std::lock_guard<std::mutex> lock(cookiesMutex);
+	for (auto& item : cookies) {
+		if (!CookieHostMatches(requestHost, item.host)) {
+			continue;
+		}
+
+		if (!cookieText.empty()) {
+			cookieText += "; ";
+		}
+		cookieText += item.cookieStr;
+	}
+	return cookieText;
+}
+
+int WebClient::HttpGet(const HttpRequest& request, std::string* response, int nTimeout)
+{
+	std::string tempResponse;
+	HttpTransport http;
+	http.Proxy = Proxy;
+	ApplyHeaders(request, http);
+
+	std::string host = GetHost(request.url);
+	ApplyCookies(host, http);
+
+	int code = http.HttpGet(request.url, response ? response : &tempResponse, nTimeout);
+	SaveCookies(host, http.GetCookie());
+	return code;
+}
+
+int WebClient::HttpPost(const HttpRequest& request, const std::string& data, std::string* response, int nTimeout)
+{
+	std::string tempResponse;
+	HttpTransport http;
+	http.Proxy = Proxy;
+	ApplyHeaders(request, http);
+
+	std::string host = GetHost(request.url);
+	ApplyCookies(host, http);
+
+	int code = http.HttpPost(request.url, data, response ? response : &tempResponse, nTimeout);
+	SaveCookies(host, http.GetCookie());
+	return code;
+}
+
+int WebClient::DownloadFile(const HttpRequest& request, const std::wstring& filename, const std::function<void(long long dltotal, long long dlnow)>& progressCallback, int nTimeout)
+{
+	HttpTransport http;
+	http.Proxy = Proxy;
+	ApplyHeaders(request, http);
+
+	std::string host = GetHost(request.url);
+	ApplyCookies(host, http);
+
+	int code = http.DownloadFile(request.url, filename, progressCallback, nTimeout);
+	SaveCookies(host, http.GetCookie());
+	return code;
+}
+
+int WebClient::SubmitForm(const HttpRequest& request, const std::vector<PostForm::Field>& fieldValues, std::string* response, int nTimeout)
+{
+	std::string tempResponse;
+	HttpTransport http;
+	http.Proxy = Proxy;
+	ApplyHeaders(request, http);
+
+	std::string host = GetHost(request.url);
+	ApplyCookies(host, http);
+
+	int code = http.SubmitForm(request.url, fieldValues, response ? response : &tempResponse, nTimeout);
+	SaveCookies(host, http.GetCookie());
+	return code;
+}
