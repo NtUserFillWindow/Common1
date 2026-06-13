@@ -1,7 +1,13 @@
 ﻿#pragma once
+#include <map>
+#include <mutex>
+#include <string>
+#include <vector>
+
 #include "HttpTransport.h"
 
-struct HttpRequest {
+class HttpRequest {
+public:
 	std::string url;
 	std::map<std::string, std::string> Header;
 
@@ -11,23 +17,41 @@ struct HttpRequest {
 	void AddHreader(const std::string& key, const std::string& value) { AddHeader(key, value); }
 };
 
+class Cookie {
+public:
+	std::string domain;
+	bool includeSubDomain = false;
+	std::string path = "/";
+	bool secure = false;
+	long long expires = 0;
+	bool httpOnly = false;
+	std::string name;
+	std::string value;
+	std::map<std::string, std::string> fields;
+
+	void AddField(const std::string& key, const std::string& value);
+	void RemoveField(const std::string& key);
+	std::string GetField(const std::string& key)const;
+	static Cookie FromCurlCookie(const std::string& curlCookie);
+	std::string ToCurlCookie()const;
+	std::string ToHeaderString()const;
+	bool MatchesHost(const std::string& host)const;
+};
+
 // HTTP 客户端，自动管理 cookie 和重定向
 class WebClient {
-	struct cookie {
-		std::string host;
-		std::string cookieStr;
-	};
-	std::vector<cookie> cookies;
+	std::vector<Cookie> cookies;
 	mutable std::mutex cookiesMutex;
 	std::string GetHost(const std::string& strUrl)const;
-	void ApplyCookies(const std::string& host, HttpTransport& http)const;
+	void ApplyCookies(const std::string& url, HttpTransport& http);
 	void SaveCookies(const std::string& host, const Text::String& cookieText);
+	bool SaveCookie(const Cookie& cookie);
 public:
 	std::string Proxy;
 	WebClient();
 	virtual ~WebClient();
-	void SetCookie(const std::string& host, const std::string& cookieStr);
-	std::string GetCookie(const std::string& host);
+	bool SetCookie(const Cookie& cookie);
+	Cookie GetCookie(const std::string& host);
 	int HttpGet(const HttpRequest& request, std::string* response = NULL, int nTimeout = 60);
 	int HttpPost(const HttpRequest& request, const std::string& data = "", std::string* response = NULL, int nTimeout = 60);
 	int DownloadFile(const HttpRequest& request, const std::wstring& filename, const std::function<void(long long dltotal, long long dlnow)>& progressCallback = NULL, int nTimeout = 99999);
