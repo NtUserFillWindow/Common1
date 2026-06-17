@@ -3,6 +3,10 @@
 #include <cctype>
 #include <cstdlib>
 #include <ctime>
+#ifndef CURL_STATICLIB
+#define CURL_STATICLIB
+#endif
+#include "curl/curl.h"
 
 namespace {
 
@@ -31,6 +35,11 @@ namespace {
 	bool StartsWith(const std::string& value, const std::string& prefix)
 	{
 		return value.size() >= prefix.size() && value.compare(0, prefix.size(), prefix) == 0;
+	}
+
+	bool StartsWithNoCase(const std::string& value, const std::string& prefix)
+	{
+		return value.size() >= prefix.size() && ToLower(value.substr(0, prefix.size())) == ToLower(prefix);
 	}
 
 	bool EndsWith(const std::string& value, const std::string& suffix)
@@ -67,6 +76,11 @@ namespace {
 	std::vector<std::string> SplitCookieList(const std::string& cookieText)
 	{
 		std::vector<std::string> items;
+		std::string trimmed = Trim(cookieText);
+		if (trimmed.empty()) {
+			return items;
+		}
+
 		if (cookieText.find('\n') != std::string::npos) {
 			size_t begin = 0;
 			while (begin <= cookieText.size()) {
@@ -81,17 +95,35 @@ namespace {
 			return items;
 		}
 
-		size_t begin = 0;
-		while (begin < cookieText.size()) {
-			size_t end = cookieText.find("; ", begin);
-			if (end == std::string::npos) {
-				items.push_back(cookieText.substr(begin));
-				break;
-			}
-			items.push_back(cookieText.substr(begin, end - begin));
-			begin = end + 2;
-		}
+		items.push_back(trimmed);
 		return items;
+	}
+
+	bool ParseCookiePair(const std::string& text, std::string* key, std::string* value)
+	{
+		size_t pos = text.find('=');
+		if (pos == std::string::npos) {
+			return false;
+		}
+
+		std::string parsedKey = Trim(text.substr(0, pos));
+		if (parsedKey.empty()) {
+			return false;
+		}
+
+		if (key) {
+			*key = parsedKey;
+		}
+		if (value) {
+			*value = Trim(text.substr(pos + 1));
+		}
+		return true;
+	}
+
+	bool ParseCookieBool(const std::string& value)
+	{
+		std::string text = ToLower(Trim(value));
+		return text == "1" || text == "true" || text == "yes";
 	}
 
 	void ApplyHeaders(const HttpRequest& request, HttpTransport& http)
@@ -129,6 +161,23 @@ namespace {
 		return value.empty() ? "/" : value;
 	}
 
+	std::string GetDefaultCookiePath(const std::string& strUrl)
+	{
+		std::string path = GetUrlPath(strUrl);
+		if (path.empty() || path[0] != '/') {
+			return "/";
+		}
+		if (path == "/") {
+			return "/";
+		}
+
+		size_t pos = path.rfind('/');
+		if (pos == std::string::npos || pos == 0) {
+			return "/";
+		}
+		return path.substr(0, pos);
+	}
+
 	bool IsSecureUrl(const std::string& strUrl)
 	{
 		std::string url = Trim(strUrl);
@@ -154,7 +203,22 @@ namespace {
 		if (candidate.path.size() != current.path.size()) {
 			return candidate.path.size() > current.path.size();
 		}
-		return NormalizeCookieHost(candidate.domain).size() > NormalizeCookieHost(current.domain).size();
+
+		std::string candidateDomain = NormalizeCookieHost(candidate.domain);
+		std::string currentDomain = NormalizeCookieHost(current.domain);
+		if (!candidateDomain.empty() && candidateDomain[0] == '.') {
+			candidateDomain.erase(0, 1);
+		}
+		if (!currentDomain.empty() && currentDomain[0] == '.') {
+			currentDomain.erase(0, 1);
+		}
+		if (candidateDomain.size() != currentDomain.size()) {
+			return candidateDomain.size() > currentDomain.size();
+		}
+
+		bool candidateHostOnly = !candidate.includeSubDomain;
+		bool currentHostOnly = !current.includeSubDomain;
+		return candidateHostOnly && !currentHostOnly;
 	}
 
 	void NormalizeCookie(Cookie& cookie)
@@ -180,16 +244,6 @@ namespace {
 		}
 	}
 
-	Cookie MakeSingleCookie(const Cookie& cookie, const std::string& key, const std::string& value)
-	{
-		Cookie item = cookie;
-		item.fields.clear();
-		item.name.clear();
-		item.value.clear();
-		item.AddField(key, value);
-		return item;
-	}
-
 	void RemoveCookieLocked(std::vector<Cookie>& cookies, const Cookie& cookie)
 	{
 		for (auto it = cookies.begin(); it != cookies.end(); ) {
@@ -201,99 +255,124 @@ namespace {
 			}
 		}
 	}
-}
 
-void Cookie::AddField(const std::string& key, const std::string& fieldValue)
-{
-	if (key.empty()) {
-		return;
-	}
-
-	fields[key] = fieldValue;
-	if (name.empty() || name == key) {
-		name = key;
-		value = fieldValue;
+	long long ParseCookieExpires(const std::string& expiresText)
+	{
+		time_t value = curl_getdate(expiresText.c_str(), nullptr);
+		return value < 0 ? 0 : (long long)value;
 	}
 }
 
-void Cookie::RemoveField(const std::string& key)
+Cookie::Cookie(const std::string& headerLine, const std::string& defaultHost, const std::string& defaultPath)
 {
-	fields.erase(key);
-	if (name != key) {
+	std::string cookieText = Trim(headerLine);
+	if (StartsWithNoCase(cookieText, "Set-Cookie:")) {
+		cookieText = Trim(cookieText.substr(sizeof("Set-Cookie:") - 1));
+	}
+	if (cookieText.empty()) {
 		return;
 	}
 
+	auto fields = Split(cookieText, ';');
 	if (fields.empty()) {
-		name.clear();
-		value.clear();
 		return;
 	}
 
-	name = fields.begin()->first;
-	value = fields.begin()->second;
+	std::string name;
+	std::string fieldValue;
+	if (!ParseCookiePair(fields[0], &name, &fieldValue)) {
+		return;
+	}
+
+	domain = defaultHost;
+	path = defaultPath.empty() ? "/" : defaultPath;
+	this->name = name;
+	value = fieldValue;
+
+	bool hasDomainAttribute = false;
+	bool hasMaxAge = false;
+	for (size_t i = 1; i < fields.size(); ++i) {
+		std::string attribute = Trim(fields[i]);
+		if (attribute.empty()) {
+			continue;
+		}
+
+		std::string attributeName;
+		std::string attributeValue;
+		if (!ParseCookiePair(attribute, &attributeName, &attributeValue)) {
+			std::string flagName = ToLower(attribute);
+			if (flagName == "secure") {
+				secure = true;
+			}
+			else if (flagName == "httponly") {
+				httpOnly = true;
+			}
+			continue;
+		}
+
+		std::string flagName = ToLower(attributeName);
+		if (flagName == "domain") {
+			domain = attributeValue.empty() ? defaultHost : attributeValue;
+			includeSubDomain = true;
+			hasDomainAttribute = true;
+		}
+		else if (flagName == "path") {
+			path = attributeValue.empty() ? "/" : attributeValue;
+		}
+		else if (flagName == "expires" && !hasMaxAge) {
+			expires = ParseCookieExpires(attributeValue);
+		}
+		else if (flagName == "max-age") {
+			hasMaxAge = true;
+			long long seconds = std::atoll(attributeValue.c_str());
+			expires = seconds <= 0 ? (long long)std::time(NULL) - 1 : (long long)std::time(NULL) + seconds;
+		}
+		else if (flagName == "__cookie_include_sub_domain") {
+			includeSubDomain = ParseCookieBool(attributeValue);
+		}
+		else if (flagName == "__cookie_expires") {
+			expires = std::atoll(attributeValue.c_str());
+		}
+	}
+
+	if (!hasDomainAttribute) {
+		domain = defaultHost;
+		includeSubDomain = false;
+	}
 }
 
-std::string Cookie::GetField(const std::string& key)const
+std::string Cookie::ToString()const
 {
-	auto item = fields.find(key);
-	return item == fields.end() ? "" : item->second;
-}
-
-Cookie Cookie::FromCurlCookie(const std::string& curlCookie)
-{
-	auto columns = Split(curlCookie, '\t');
-	if (columns.size() < 7) {
-		return Cookie();
-	}
-
-	Cookie parsed;
-	parsed.domain = columns[0];
-	parsed.includeSubDomain = ToLower(columns[1]) == "true";
-	parsed.path = columns[2].empty() ? "/" : columns[2];
-	parsed.secure = ToLower(columns[3]) == "true";
-	parsed.expires = std::atoll(columns[4].c_str());
-	NormalizeCookie(parsed);
-	parsed.AddField(columns[5], columns[6]);
-	if (parsed.name.empty()) {
-		return Cookie();
-	}
-
-	return parsed;
-}
-
-std::string Cookie::ToCurlCookie()const
-{
-	std::string cookieDomain = domain;
-	if (httpOnly && !StartsWith(cookieDomain, "#HttpOnly_")) {
-		cookieDomain = "#HttpOnly_" + cookieDomain;
-	}
-	std::string cookieName = name;
-	std::string cookieValue = value;
-	if (cookieName.empty() && !fields.empty()) {
-		cookieName = fields.begin()->first;
-		cookieValue = fields.begin()->second;
-	}
-
-	return cookieDomain + "\t" +
-		(includeSubDomain ? "TRUE" : "FALSE") + "\t" +
-		(path.empty() ? "/" : path) + "\t" +
-		(secure ? "TRUE" : "FALSE") + "\t" +
-		std::to_string(expires) + "\t" +
-		cookieName + "\t" + cookieValue;
-}
-
-std::string Cookie::ToHeaderString()const
-{
-	if (fields.empty()) {
-		return name.empty() ? "" : name + "=" + value;
-	}
-
 	std::string cookieText;
-	for (auto& item : fields) {
+	auto AddPart = [&](const std::string& part) {
+		if (part.empty()) {
+			return;
+		}
 		if (!cookieText.empty()) {
 			cookieText += "; ";
 		}
-		cookieText += item.first + "=" + item.second;
+		cookieText += part;
+		};
+
+	std::string primaryName = name;
+	std::string primaryValue = value;
+
+	if (primaryName.empty()) {
+		return "";
+	}
+	AddPart(primaryName + "=" + primaryValue);
+
+	if (!domain.empty()) {
+		AddPart("Domain=" + domain);
+	}
+	AddPart("__cookie_include_sub_domain=" + std::string(includeSubDomain ? "1" : "0"));
+	AddPart("Path=" + (path.empty() ? "/" : path));
+	if (secure) {
+		AddPart("Secure");
+	}
+	AddPart("__cookie_expires=" + std::to_string(expires));
+	if (httpOnly) {
+		AddPart("HttpOnly");
 	}
 	return cookieText;
 }
@@ -390,66 +469,46 @@ void WebClient::ApplyCookies(const std::string& url, HttpTransport& http)
 	}
 }
 
-void WebClient::SaveCookies(const std::string& host, const Text::String& cookieText)
+void WebClient::SaveCookies(const std::string& url, const Text::String& cookieText)
 {
+	std::string host = GetHost(url);
+	std::string defaultPath = GetDefaultCookiePath(url);
 	for (auto& item : SplitCookieList(cookieText)) {
 		item = Trim(item);
 		if (item.empty()) {
 			continue;
 		}
 
-		Cookie cookie = Cookie::FromCurlCookie(item);
+		Cookie cookie(item, host, defaultPath);
+
 		if (!cookie.name.empty()) {
-			if (cookie.domain.empty()) {
-				cookie.domain = host;
-			}
 			SetCookie(cookie);
 		}
 	}
-}
-
-bool WebClient::SaveCookie(const Cookie& cookie)
-{
-	if (cookie.name.empty()) {
-		return false;
-	}
-
-	std::lock_guard<std::mutex> lock(cookiesMutex);
-	for (auto& item : cookies) {
-		if (SameCookieKey(item, cookie)) {
-			item = cookie;
-			return true;
-		}
-	}
-	cookies.push_back(cookie);
-	return true;
 }
 
 bool WebClient::SetCookie(const Cookie& cookie)
 {
 	Cookie newCookie = cookie;
 	NormalizeCookie(newCookie);
-	if (newCookie.fields.empty() && !newCookie.name.empty()) {
-		newCookie.AddField(newCookie.name, newCookie.value);
-	}
-
-	if (newCookie.fields.empty()) {
+	if (newCookie.name.empty()) {
 		return false;
 	}
 
+	std::lock_guard<std::mutex> lock(cookiesMutex);
 	if (CookieExpired(newCookie)) {
-		std::lock_guard<std::mutex> lock(cookiesMutex);
-		for (const auto& field : newCookie.fields) {
-			RemoveCookieLocked(cookies, MakeSingleCookie(newCookie, field.first, field.second));
-		}
+		RemoveCookieLocked(cookies, newCookie);
 		return false;
 	}
 
-	bool saved = false;
-	for (const auto& field : newCookie.fields) {
-		saved = SaveCookie(MakeSingleCookie(newCookie, field.first, field.second)) || saved;
+	for (auto& stored : cookies) {
+		if (SameCookieKey(stored, newCookie)) {
+			stored = newCookie;
+			return true;
+		}
 	}
-	return saved;
+	cookies.push_back(newCookie);
+	return true;
 }
 
 Cookie WebClient::GetCookie(const std::string& host)
@@ -457,6 +516,7 @@ Cookie WebClient::GetCookie(const std::string& host)
 	std::string requestHost = GetHost(host);
 	Cookie result;
 	result.domain = requestHost;
+	bool found = false;
 
 	std::lock_guard<std::mutex> lock(cookiesMutex);
 	for (auto it = cookies.begin(); it != cookies.end(); ) {
@@ -466,7 +526,10 @@ Cookie WebClient::GetCookie(const std::string& host)
 		}
 
 		if (it->MatchesHost(requestHost) && !it->name.empty()) {
-			result.AddField(it->name, it->value);
+			if (!found || CookieMoreSpecific(*it, result)) {
+				result = *it;
+				found = true;
+			}
 		}
 		++it;
 	}
@@ -480,11 +543,10 @@ int WebClient::HttpGet(const HttpRequest& request, std::string* response, int nT
 	http.Proxy = Proxy;
 	ApplyHeaders(request, http);
 
-	std::string host = GetHost(request.url);
 	ApplyCookies(request.url, http);
 
 	int code = http.HttpGet(request.url, response ? response : &tempResponse, nTimeout);
-	SaveCookies(host, http.GetCookie());
+	SaveCookies(request.url, http.GetCookie());
 	return code;
 }
 
@@ -495,11 +557,10 @@ int WebClient::HttpPost(const HttpRequest& request, const std::string& data, std
 	http.Proxy = Proxy;
 	ApplyHeaders(request, http);
 
-	std::string host = GetHost(request.url);
 	ApplyCookies(request.url, http);
 
 	int code = http.HttpPost(request.url, data, response ? response : &tempResponse, nTimeout);
-	SaveCookies(host, http.GetCookie());
+	SaveCookies(request.url, http.GetCookie());
 	return code;
 }
 
@@ -509,11 +570,10 @@ int WebClient::DownloadFile(const HttpRequest& request, const std::wstring& file
 	http.Proxy = Proxy;
 	ApplyHeaders(request, http);
 
-	std::string host = GetHost(request.url);
 	ApplyCookies(request.url, http);
 
 	int code = http.DownloadFile(request.url, filename, progressCallback, nTimeout);
-	SaveCookies(host, http.GetCookie());
+	SaveCookies(request.url, http.GetCookie());
 	return code;
 }
 
@@ -524,10 +584,9 @@ int WebClient::SubmitForm(const HttpRequest& request, const std::vector<PostForm
 	http.Proxy = Proxy;
 	ApplyHeaders(request, http);
 
-	std::string host = GetHost(request.url);
 	ApplyCookies(request.url, http);
 
 	int code = http.SubmitForm(request.url, fieldValues, response ? response : &tempResponse, nTimeout);
-	SaveCookies(host, http.GetCookie());
+	SaveCookies(request.url, http.GetCookie());
 	return code;
 }

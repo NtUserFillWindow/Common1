@@ -7,6 +7,7 @@
 #endif // !CURL_STATICLIB
 #include "curl/curl.h"
 #include "curl/easy.h"
+#include <string.h>
 #pragma comment(lib,"Crypt32.lib")//curl需要的库
 #pragma comment(lib,"wldap32.lib")//curl需要的库
 #pragma comment(lib,"ws2_32.lib") //curl需要的库
@@ -24,8 +25,18 @@ struct StructCallback
 
 //接收响应body
 size_t g_curl_write_callback(char* contents, size_t size, size_t nmemb, void* respone);
+//接收响应header
+size_t g_curl_header_callback(char* contents, size_t size, size_t nmemb, void* respone);
 //接受上传或者下载进度
 int g_curl_progress_callback(void* ptr, __int64 dltotal, __int64 dlnow, __int64 ultotal, __int64 ulnow);
+
+namespace {
+	bool StartsWithNoCase(const std::string& value, const char* prefix)
+	{
+		size_t prefixLen = strlen(prefix);
+		return value.size() >= prefixLen && _strnicmp(value.c_str(), prefix, prefixLen) == 0;
+	}
+}
 
 int CurlGlobalInit() {
 	if (!g_curl_bInit) {
@@ -80,6 +91,16 @@ size_t g_curl_write_callback(char* ptr, size_t size, size_t nmemb, void* userdat
 	return count;
 };
 
+size_t g_curl_header_callback(char* ptr, size_t size, size_t nmemb, void* userdata)
+{
+	size_t count = size * nmemb;
+	auto* header = (std::string*)userdata;
+	if (header && count > 0) {
+		header->append(ptr, count);
+	}
+	return count;
+}
+
 int g_curl_progress_callback(void* ptr, __int64 dltotal, __int64 dlnow, __int64 ultotal, __int64 ulnow)
 {
 	if (!ptr || dltotal <= 0) return 0;
@@ -110,6 +131,8 @@ CURL* HttpTransport::Init(const std::string& strUrl, std::string* strResponse, i
 	this->content.type = 0;
 	this->content.cancel = false;
 	this->content.tag = strResponse;
+	this->cookieStr.clear();
+	this->responseHeader.clear();
 	if (!Proxy.empty()) {
 		curl_easy_setopt(curl, CURLOPT_PROXY, Proxy.c_str()); //代理服务器地址
 	}
@@ -129,6 +152,8 @@ CURL* HttpTransport::Init(const std::string& strUrl, std::string* strResponse, i
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, nTimeout);//设置超时
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &this->content);//
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, g_curl_write_callback);//接受回调
+	curl_easy_setopt(curl, CURLOPT_HEADERDATA, &this->responseHeader);
+	curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, g_curl_header_callback);
 
 	for (auto& it : Header) {
 		auto hd = it.first + ":" + it.second;
@@ -144,22 +169,24 @@ long HttpTransport::CleanUp(void* curl, int code) {
 	{
 		//获取响应的状态码
 		curl_easy_getinfo((CURL*)curl, CURLINFO_RESPONSE_CODE, &RESPONSE_CODE);
-
-		struct curl_slist* cookies = NULL;
-		curl_easy_getinfo((CURL*)curl, CURLINFO_COOKIELIST, &cookies);       //获得cookie数据  
-
-		if (cookies) {
-			cookieStr.clear(); // 清空旧的 cookies，避免累积
-			struct curl_slist* current = cookies;
-			while (current)
-			{
-				if (!cookieStr.empty()) {
-					cookieStr.append("; "); // 添加分隔符
-				}
-				cookieStr.append(current->data);
-				current = current->next;
+		cookieStr.clear();
+		size_t begin = 0;
+		while (begin < responseHeader.size()) {
+			size_t end = responseHeader.find('\n', begin);
+			std::string line = responseHeader.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+			if (!line.empty() && line.back() == '\r') {
+				line.pop_back();
 			}
-			curl_slist_free_all(cookies); // 释放 cookie list 内存
+			if (StartsWithNoCase(line, "Set-Cookie:")) {
+				if (!cookieStr.empty()) {
+					cookieStr.append("\n");
+				}
+				cookieStr.append(line);
+			}
+			if (end == std::string::npos) {
+				break;
+			}
+			begin = end + 1;
 		}
 	}
 

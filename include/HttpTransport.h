@@ -79,6 +79,7 @@ private:
 	std::map<std::string, std::string> Header;
 	void* curl_header = NULL;//类型参见 curl_slist
 	std::string cookieStr;
+	std::string responseHeader;
 	std::map<std::string, std::string> Cookies;
 public:
 	std::string Proxy;

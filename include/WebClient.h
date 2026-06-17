@@ -27,14 +27,9 @@ public:
 	bool httpOnly = false;
 	std::string name;
 	std::string value;
-	std::map<std::string, std::string> fields;
-
-	void AddField(const std::string& key, const std::string& value);
-	void RemoveField(const std::string& key);
-	std::string GetField(const std::string& key)const;
-	static Cookie FromCurlCookie(const std::string& curlCookie);
-	std::string ToCurlCookie()const;
-	std::string ToHeaderString()const;
+	Cookie() = default;
+	Cookie(const std::string& headerLine, const std::string& defaultHost = "", const std::string& defaultPath = "/");
+	std::string ToString()const;
 	bool MatchesHost(const std::string& host)const;
 };
 
@@ -44,8 +39,7 @@ class WebClient {
 	mutable std::mutex cookiesMutex;
 	std::string GetHost(const std::string& strUrl)const;
 	void ApplyCookies(const std::string& url, HttpTransport& http);
-	void SaveCookies(const std::string& host, const Text::String& cookieText);
-	bool SaveCookie(const Cookie& cookie);
+	void SaveCookies(const std::string& url, const Text::String& cookieText);
 public:
 	std::string Proxy;
 	WebClient();
