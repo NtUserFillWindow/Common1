@@ -153,7 +153,7 @@ namespace WinTool {
 	/// 获取操作系统的版本号
 	extern Text::String GetWinVersion();
 	/// 弹出选择文件对话框(filter:逗号或者分号分割,multiSelect:是否可以选则多个文件)
-	extern std::vector<Text::String> ShowFileDialog(HWND ownerWnd = NULL, const Text::String& filter = "*.*", bool multiSelect = true);
+	extern std::vector<Text::String> ShowFileDialog(HWND ownerWnd = NULL, const Text::String& filter = "*.*", bool multiSelect = true, const Text::String& defaultPath = "");
 	/// 弹出选择目录对话框
 	extern Text::String ShowFolderDialog(HWND ownerWnd = NULL, const Text::String& defaultPath = "", const Text::String& title = "Select a directory");
 	/// 获取路由信息

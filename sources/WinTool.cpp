@@ -1118,9 +1118,17 @@ namespace WinTool {
 		return files;
 	}
 
-	std::vector<Text::String> ShowFileDialog(HWND ownerWnd, const Text::String& filter, bool multiSelect) {
+	std::vector<Text::String> ShowFileDialog(HWND ownerWnd, const Text::String& filter, bool multiSelect, const Text::String& defaultPath) {
 
 		std::vector<Text::String> out;
+		Text::String initialDir = Path::Format(defaultPath);
+		if (!initialDir.empty() && !Directory::Exists(initialDir)) {
+			initialDir = Path::GetDirectoryName(initialDir);
+		}
+		if (!initialDir.empty() && !Directory::Exists(initialDir)) {
+			initialDir.clear();
+		}
+		std::wstring initialDirW = initialDir.unicode();
 
 		OPENFILENAMEW ofn;       // 打开文件对话框结构体
 		WCHAR szFile[MAX_PATH * 100]{ 0 };       // 选择的文件名
@@ -1160,16 +1168,20 @@ namespace WinTool {
 
 		ofn.lpstrFileTitle = NULL;
 		ofn.nMaxFileTitle = 0;
-		ofn.lpstrInitialDir = NULL;
+		ofn.lpstrInitialDir = initialDirW.empty() ? NULL : initialDirW.c_str();
 
 		if (multiSelect) {
-			ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_ALLOWMULTISELECT | OFN_EXPLORER | OFN_ENABLESIZING;
+			ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_ALLOWMULTISELECT | OFN_EXPLORER | OFN_ENABLESIZING | OFN_NOCHANGEDIR;
 		}
 		else {
-			ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_EXPLORER | OFN_ENABLESIZING;
+			ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_EXPLORER | OFN_ENABLESIZING | OFN_NOCHANGEDIR;
 		}
 
-		auto oldWorkDir = Path::StartPath();
+		WCHAR oldWorkDir[MAX_PATH]{ 0 };
+		DWORD oldWorkDirLen = ::GetCurrentDirectoryW(ARRAYSIZE(oldWorkDir), oldWorkDir);
+		if (!initialDir.empty()) {
+			::SetCurrentDirectoryW(initialDir.unicode().c_str());
+		}
 		do
 		{
 			// 显示文件对话框
@@ -1178,7 +1190,9 @@ namespace WinTool {
 				break;
 			}
 		} while (false);
-		::SetCurrentDirectoryW(oldWorkDir.unicode().c_str());
+		if (oldWorkDirLen > 0) {
+			::SetCurrentDirectoryW(oldWorkDir);
+		}
 		return out;
 	}
 
@@ -1186,26 +1200,66 @@ namespace WinTool {
 		//记录旧的工作目录
 		auto oldWorkDir = Path::StartPath();
 
-		WCHAR selectedPath[MAX_PATH]{ 0 };
-		BROWSEINFOW browseInfo{ 0 };
-		browseInfo.hwndOwner = ownerWnd;
-		browseInfo.pszDisplayName = selectedPath;
-		auto wTitle = title.unicode();
-		browseInfo.lpszTitle = wTitle.c_str();
-		//设置根目录
-		LPITEMIDLIST pidlRoot;
-		::SHParseDisplayName(defaultPath.unicode().c_str(), NULL, &pidlRoot, 0, NULL);
-		browseInfo.pidlRoot = pidlRoot;
-		browseInfo.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-		LPITEMIDLIST itemIdList = SHBrowseForFolderW(&browseInfo);
-		do
-		{
-			if (itemIdList != nullptr) {
-				SHGetPathFromIDListW(itemIdList, selectedPath);//设置路径
-				CoTaskMemFree(itemIdList);//清理
+		Text::String selectedPath;
+		HRESULT coInitHr = ::CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+		bool needUninitialize = SUCCEEDED(coInitHr);
+		if (FAILED(coInitHr) && coInitHr != RPC_E_CHANGED_MODE) {
+			::SetCurrentDirectoryW(oldWorkDir.unicode().c_str());
+			return selectedPath;
+		}
+
+		IFileOpenDialog* dialog = NULL;
+		do {
+			HRESULT hr = ::CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog));
+			if (FAILED(hr) || !dialog) {
 				break;
 			}
+
+			DWORD options = 0;
+			dialog->GetOptions(&options);
+			dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR);
+
+			auto wTitle = title.unicode();
+			if (!wTitle.empty()) {
+				dialog->SetTitle(wTitle.c_str());
+			}
+
+			if (!defaultPath.empty()) {
+				IShellItem* defaultFolder = NULL;
+				auto wDefaultPath = defaultPath.unicode();
+				hr = ::SHCreateItemFromParsingName(wDefaultPath.c_str(), NULL, IID_PPV_ARGS(&defaultFolder));
+				if (SUCCEEDED(hr) && defaultFolder) {
+					dialog->SetFolder(defaultFolder);
+					defaultFolder->Release();
+				}
+			}
+
+			hr = dialog->Show(ownerWnd);
+			if (FAILED(hr)) {
+				break;
+			}
+
+			IShellItem* item = NULL;
+			hr = dialog->GetResult(&item);
+			if (FAILED(hr) || !item) {
+				break;
+			}
+
+			PWSTR filePath = NULL;
+			hr = item->GetDisplayName(SIGDN_FILESYSPATH, &filePath);
+			if (SUCCEEDED(hr) && filePath) {
+				selectedPath = filePath;
+				::CoTaskMemFree(filePath);
+			}
+			item->Release();
 		} while (false);
+
+		if (dialog) {
+			dialog->Release();
+		}
+		if (needUninitialize) {
+			::CoUninitialize();
+		}
 		//恢复工作目录
 		::SetCurrentDirectoryW(oldWorkDir.unicode().c_str());
 		return selectedPath;

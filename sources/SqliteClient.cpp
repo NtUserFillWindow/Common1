@@ -1,4 +1,4 @@
-#include "SqliteClient.h"
+﻿#include "SqliteClient.h"
 
 #include "sqlite/sqlite3.h"
 
